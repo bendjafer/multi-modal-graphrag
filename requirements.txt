@@ -1,6 +1,8 @@
 # Core PDF processing
 docling
 docling-core
+markdowncleaner
+
 
 # OCR
 easyocr==1.7.2
@@ -19,3 +21,5 @@ pydantic==2.10.6
 
 # Async support
 aiohttp==3.11.10
+
+mdformat>=0.7.0

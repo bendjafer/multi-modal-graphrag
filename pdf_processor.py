@@ -1,4 +1,4 @@
-"""Core PDF processing with async batch image filtering."""
+"""Core PDF processing with async batch image filtering - MEMORY EFFICIENT."""
 
 import asyncio
 import hashlib
@@ -21,6 +21,7 @@ from config import (
 )
 from models import ImageAsset, ProcessingResult
 from vision_model import VisionModel
+from markdown_processor import MarkdownProcessor
 
 logger = logging.getLogger(__name__)
 
@@ -35,6 +36,7 @@ class PDFProcessor:
             api_key=OPENAI_API_KEY, 
             max_concurrent=MAX_CONCURRENT_REQUESTS
         )
+        self.markdown_processor = MarkdownProcessor()
         
     def process(self, pdf_path: Path, context: str = "") -> ProcessingResult:
         """Process a single PDF file."""
@@ -57,21 +59,44 @@ class PDFProcessor:
         images_dir = output_dir / IMAGES_SUBDIR
         images_dir.mkdir(exist_ok=True)
         
+        # Convert PDF to markdown
         converter = self._create_converter()
         result = converter.convert(pdf_path)
         document = result.document
         
-        markdown_content = document.export_to_markdown()
+        # Export raw markdown
+        raw_markdown_content = document.export_to_markdown()
+        raw_markdown_path = output_dir / MARKDOWN_SUBDIR / f"{doc_id}_raw.md"
+        raw_markdown_path.parent.mkdir(exist_ok=True)
+        raw_markdown_path.write_text(raw_markdown_content, encoding='utf-8')
+        
+        # Extract and filter images (memory-efficient - saves only approved images)
+        images = asyncio.run(
+            self._extract_and_filter_images_async(document, images_dir, context)
+        )
+        
+        # Prepare image metadata
+        image_metadata = [
+            {
+                'page': img.page, 
+                'description': img.description, 
+                'entities': img.entities
+            } 
+            for img in images
+        ]
+        
+        # Process markdown (clean + add image descriptions)
+        cleaned_markdown = self.markdown_processor.pipeline(
+            raw_markdown_path=raw_markdown_path,
+            image_metadata=image_metadata,
+            save_cleaned=False
+        )
+        
+        # Save final markdown
         markdown_path = output_dir / MARKDOWN_SUBDIR / f"{doc_id}.md"
-        markdown_path.parent.mkdir(exist_ok=True)
-        markdown_path.write_text(markdown_content, encoding='utf-8')
+        markdown_path.write_text(cleaned_markdown, encoding='utf-8')
         
-        images = asyncio.run(self._extract_and_filter_images_async(
-            document, 
-            images_dir, 
-            context
-        ))
-        
+        # Create result object
         result_obj = ProcessingResult(
             document_id=doc_id,
             total_pages=len(document.pages),
@@ -80,6 +105,7 @@ class PDFProcessor:
             stats=self.stats.copy()
         )
         
+        # Save metadata
         metadata_path = output_dir / f"{doc_id}_metadata.json"
         metadata_path.write_text(json.dumps(result_obj.to_dict(), indent=2))
         
@@ -108,7 +134,10 @@ class PDFProcessor:
         output_dir: Path,
         context: str
     ) -> List[ImageAsset]:
-        """Extract figures and filter with AI in async batches."""
+        """
+        Extract figures and filter with AI in async batches.
+        MEMORY EFFICIENT: Images kept in memory until AI approval.
+        """
         
         image_candidates = []
         
@@ -157,17 +186,14 @@ class PDFProcessor:
                 
                 full_context = f"{context} | Page {page_label} | Caption: {caption}"
                 
-                # Save temporary image
-                temp_path = output_dir / f"temp_p{page_label}_i{pic_idx}_{img_hash[:8]}.png"
-                image_data.save(temp_path, 'PNG')
-                
+                # ✅ KEEP IN MEMORY - Don't save to disk yet!
                 image_candidates.append({
-                    'path': temp_path,
+                    'image_data': image_data,  # PIL Image object in memory
                     'final_name': f"page_{page_label:03d}_fig_{pic_idx}_{img_hash[:16]}.png",
                     'context': full_context,
                     'hash': img_hash,
                     'page': page_label,
-                    'image_data': image_data
+                    'pic_idx': pic_idx
                 })
                 
         except Exception as e:
@@ -177,27 +203,28 @@ class PDFProcessor:
             logger.info("No images passed size/duplicate filters")
             return []
         
-        # Batch AI analysis
+        # Batch AI analysis (images sent directly from memory)
         logger.info(f"Analyzing {len(image_candidates)} images with AI...")
         
-        paths = [str(img['path']) for img in image_candidates]
-        contexts = [img['context'] for img in image_candidates]
+        pil_images = [candidate['image_data'] for candidate in image_candidates]
+        contexts = [candidate['context'] for candidate in image_candidates]
         
-        ai_results = await self.vision.analyze_images_batch(paths, contexts)
+        # Send PIL Images directly to AI (no disk I/O)
+        ai_results = await self.vision.analyze_images_batch_memory(pil_images, contexts)
         
-        # Process results
+        # ✅ NOW save only images that pass AI filter
         kept_images = []
         for candidate, ai_result in zip(image_candidates, ai_results):
-            temp_path = candidate['path']
             
             if not ai_result['keep']:
-                temp_path.unlink(missing_ok=True)
+                # Don't save - just discard from memory
                 self.stats['filtered_ai'] += 1
                 logger.info(f"❌ {candidate['final_name']}: {ai_result['reason']}")
                 continue
             
+            # ✅ AI approved - NOW save to disk (ONLY approved images written)
             final_path = output_dir / candidate['final_name']
-            temp_path.rename(final_path)
+            candidate['image_data'].save(final_path, 'PNG')
             
             asset = ImageAsset(
                 path=final_path,

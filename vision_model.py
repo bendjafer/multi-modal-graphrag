@@ -4,12 +4,12 @@ import asyncio
 import base64
 import json
 import logging
-import os
 import re
-import time
 from typing import Dict, List, Optional
+from io import BytesIO
 
 from openai import AsyncOpenAI, RateLimitError
+from PIL import Image
 
 from config import OPENAI_API_KEY, VISION_MODEL
 
@@ -26,34 +26,102 @@ class VisionModel:
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.semaphore = asyncio.Semaphore(max_concurrent)
-        
+    
     async def analyze_images_batch(self, image_paths: List[str], contexts: List[str]) -> List[Dict]:
-        """Analyze multiple images concurrently."""
+        """Analyze multiple images concurrently from file paths."""
         tasks = [
             self._analyze_single(path, ctx) 
             for path, ctx in zip(image_paths, contexts)
         ]
         return await asyncio.gather(*tasks)
     
+    async def analyze_images_batch_memory(
+        self, 
+        pil_images: List[Image.Image], 
+        contexts: List[str]
+    ) -> List[Dict]:
+        """
+        Analyze multiple PIL Images directly from memory (no disk I/O).
+        
+        Args:
+            pil_images: List of PIL Image objects
+            contexts: Context for each image
+            
+        Returns:
+            List of analysis results
+        """
+        if len(pil_images) != len(contexts):
+            raise ValueError("pil_images and contexts must have same length")
+        
+        tasks = [
+            self._analyze_single_memory(img, ctx) 
+            for img, ctx in zip(pil_images, contexts)
+        ]
+        
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        
+        # Handle exceptions
+        processed = []
+        for i, result in enumerate(results):
+            if isinstance(result, Exception):
+                logger.error(f"Image {i} analysis failed: {result}")
+                processed.append({
+                    'keep': False,
+                    'reason': f"Analysis error: {str(result)}",
+                    'description': None,
+                    'entities': None
+                })
+            else:
+                processed.append(result)
+        
+        return processed
+    
     async def _analyze_single(self, image_path: str, context: str) -> Dict:
-        """Analyze single image with semaphore control."""
+        """Analyze single image from file path with semaphore control."""
         async with self.semaphore:
             try:
-                base64_image = self._encode_image(image_path)
+                base64_image = self._encode_image_from_path(image_path)
                 response_text = await self._call_api_with_retry(base64_image, context)
                 return self._parse_response(response_text)
             except Exception as e:
                 logger.error(f"AI analysis failed for {image_path}: {e}")
-                return {"keep": False, "reason": f"Error: {e}", "description": None, "entities": None}
+                return {
+                    "keep": False, 
+                    "reason": f"Error: {e}", 
+                    "description": None, 
+                    "entities": None
+                }
+    
+    async def _analyze_single_memory(self, pil_image: Image.Image, context: str) -> Dict:
+        """Analyze single PIL Image from memory with semaphore control."""
+        async with self.semaphore:
+            try:
+                base64_image = self._encode_image_from_pil(pil_image)
+                response_text = await self._call_api_with_retry(base64_image, context)
+                return self._parse_response(response_text)
+            except Exception as e:
+                logger.error(f"AI analysis failed for image: {e}")
+                return {
+                    "keep": False, 
+                    "reason": f"Error: {e}", 
+                    "description": None, 
+                    "entities": None
+                }
     
     def analyze_image(self, image_path: str, context: str = "") -> Dict:
         """Synchronous wrapper for single image (backwards compatible)."""
         return asyncio.run(self._analyze_single(image_path, context))
     
-    def _encode_image(self, image_path: str) -> str:
-        """Encode image to base64."""
+    def _encode_image_from_path(self, image_path: str) -> str:
+        """Encode image file to base64."""
         with open(image_path, "rb") as f:
             return base64.b64encode(f.read()).decode('utf-8')
+    
+    def _encode_image_from_pil(self, pil_image: Image.Image) -> str:
+        """Encode PIL Image to base64 without saving to disk."""
+        buffered = BytesIO()
+        pil_image.save(buffered, format="PNG")
+        return base64.b64encode(buffered.getvalue()).decode('utf-8')
     
     async def _call_api_with_retry(self, base64_image: str, context: str) -> str:
         """Call API with exponential backoff retry logic."""
@@ -65,7 +133,10 @@ class VisionModel:
                     raise
                 
                 wait_time = self.base_delay * (2 ** attempt)
-                logger.warning(f"Rate limit hit, waiting {wait_time:.1f}s before retry {attempt + 1}/{self.max_retries}")
+                logger.warning(
+                    f"Rate limit hit, waiting {wait_time:.1f}s "
+                    f"before retry {attempt + 1}/{self.max_retries}"
+                )
                 await asyncio.sleep(wait_time)
             except Exception as e:
                 raise
@@ -120,21 +191,40 @@ Now analyze:"""
     def _parse_response(self, text: str) -> Dict:
         """Parse AI response into structured data."""
         if not text:
-            return {"keep": False, "reason": "Empty response", "description": None, "entities": None}
+            return {
+                "keep": False, 
+                "reason": "Empty response", 
+                "description": None, 
+                "entities": None
+            }
         
         decision = text[0]
         if decision not in ['0', '1']:
             logger.warning(f"Invalid decision character: {decision}")
-            return {"keep": False, "reason": "Invalid format", "description": None, "entities": None}
+            return {
+                "keep": False, 
+                "reason": "Invalid format", 
+                "description": None, 
+                "entities": None
+            }
         
         keep = (decision == '1')
         
         if not keep:
             reason_match = re.search(r'REASON:\s*(.+)', text, re.IGNORECASE | re.DOTALL)
             reason = reason_match.group(1).strip() if reason_match else text[1:].strip()
-            return {"keep": False, "reason": reason, "description": None, "entities": None}
+            return {
+                "keep": False, 
+                "reason": reason, 
+                "description": None, 
+                "entities": None
+            }
         
-        desc_match = re.search(r'DESCRIPTION:\s*(.+?)(?=ENTITIES:|$)', text, re.IGNORECASE | re.DOTALL)
+        desc_match = re.search(
+            r'DESCRIPTION:\s*(.+?)(?=ENTITIES:|$)', 
+            text, 
+            re.IGNORECASE | re.DOTALL
+        )
         description = desc_match.group(1).strip() if desc_match else ""
         
         entities = []
