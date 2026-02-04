@@ -1,0 +1,21 @@
+# Core PDF processing
+docling
+docling-core
+
+# OCR
+easyocr==1.7.2
+
+# Image processing
+Pillow==11.0.0
+
+# OpenAI API with async support
+openai==1.59.5
+
+# Progress bar
+tqdm==4.67.1
+
+# Data handling
+pydantic==2.10.6
+
+# Async support
+aiohttp==3.11.10

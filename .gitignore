@@ -1,0 +1,65 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+trash/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# txt files
+prompts.txt
+
+# datasets
+dummy_pdfs/
+pdf_database/
+results/
+
+# Virtual environments
+venv/
+ENV/
+env/
+rag/
+
+# Output directories
+results/
+dummy_pdfs/
+
+# Cache directories
+.cache/
+*.cache
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+EOF
+
+
+
+# git add .gitignore config.py models.py pdf_processor.py process.py requirements.txt trash/ vision_model.py
