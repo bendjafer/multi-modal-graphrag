@@ -2,16 +2,25 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import logging
 import re
 from typing import Dict, List, Optional
 from io import BytesIO
+from pathlib import Path
 
 from openai import AsyncOpenAI, RateLimitError
 from PIL import Image
 
-from config import OPENAI_API_KEY, VISION_MODEL
+try:
+    from diskcache import Cache
+    HAS_DISKCACHE = True
+except ImportError:
+    HAS_DISKCACHE = False
+    logging.warning("diskcache not installed. Vision API responses won't be cached. Install with: pip install diskcache")
+
+from config import OPENAI_API_KEY, VISION_MODEL, ENABLE_VISION_CACHE, VISION_CACHE_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +35,21 @@ class VisionModel:
         self.max_retries = max_retries
         self.base_delay = base_delay
         self.semaphore = asyncio.Semaphore(max_concurrent)
+        
+        # Initialize cache if enabled
+        self.cache_enabled = ENABLE_VISION_CACHE and HAS_DISKCACHE
+        if self.cache_enabled:
+            cache_path = Path(VISION_CACHE_DIR)
+            cache_path.mkdir(parents=True, exist_ok=True)
+            self.cache = Cache(str(cache_path))
+            logger.info(f"Vision API caching enabled at {cache_path}")
+        else:
+            self.cache = None
+    
+    def _get_cache_key(self, image_data: bytes, context: str) -> str:
+        """Generate cache key from image data and context."""
+        content = image_data + context.encode('utf-8')
+        return hashlib.sha256(content).hexdigest()
     
     async def analyze_images_batch(self, image_paths: List[str], contexts: List[str]) -> List[Dict]:
         """Analyze multiple images concurrently from file paths."""
@@ -96,9 +120,26 @@ class VisionModel:
         """Analyze single PIL Image from memory with semaphore control."""
         async with self.semaphore:
             try:
+                # Encode image for cache key and API
                 base64_image = self._encode_image_from_pil(pil_image)
+                
+                # Check cache if enabled
+                if self.cache_enabled:
+                    cache_key = self._get_cache_key(base64.b64decode(base64_image), context)
+                    cached_result = self.cache.get(cache_key)
+                    if cached_result is not None:
+                        logger.debug(f"Cache hit for image analysis")
+                        return cached_result
+                
+                # Cache miss or disabled - call API
                 response_text = await self._call_api_with_retry(base64_image, context)
-                return self._parse_response(response_text)
+                result = self._parse_response(response_text)
+                
+                # Store in cache if enabled
+                if self.cache_enabled:
+                    self.cache.set(cache_key, result)
+                
+                return result
             except Exception as e:
                 logger.error(f"AI analysis failed for image: {e}")
                 return {

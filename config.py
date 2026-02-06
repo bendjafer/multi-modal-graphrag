@@ -45,3 +45,13 @@ MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "10"))
 # Logging Configuration
 LOG_LEVEL = os.getenv("LOG_LEVEL", "INFO")
 LOG_FORMAT = os.getenv("LOG_FORMAT", "%(asctime)s - %(levelname)s - %(message)s")
+
+# Markdown Cleaning Configuration
+MIN_LINE_LENGTH = int(os.getenv("MIN_LINE_LENGTH", "15"))
+MIN_SECTION_CONTENT_WORDS = int(os.getenv("MIN_SECTION_CONTENT_WORDS", "3"))
+REMOVE_CITATION_NUMBERS = os.getenv("REMOVE_CITATION_NUMBERS", "true").lower() == "true"
+REMOVE_PHOTO_CREDITS = os.getenv("REMOVE_PHOTO_CREDITS", "true").lower() == "true"
+
+# Vision API Caching
+ENABLE_VISION_CACHE = os.getenv("ENABLE_VISION_CACHE", "true").lower() == "true"
+VISION_CACHE_DIR = os.getenv("VISION_CACHE_DIR", ".cache/vision_responses")

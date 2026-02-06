@@ -14,6 +14,13 @@ from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.document_converter import DocumentConverter, PdfFormatOption
 from PIL import Image
 
+try:
+    import imagehash
+    HAS_IMAGEHASH = True
+except ImportError:
+    HAS_IMAGEHASH = False
+    logging.warning("imagehash not installed. Using SHA256 hashing. Install with: pip install imagehash")
+
 from config import (
     BASE_OUTPUT_DIR, IMAGES_SUBDIR, MARKDOWN_SUBDIR,
     MIN_IMAGE_SIZE, MAX_IMAGE_SIZE,
@@ -85,8 +92,8 @@ class PDFProcessor:
             for img in images
         ]
         
-        # Process markdown (clean + add image descriptions)
-        cleaned_markdown = self.markdown_processor.pipeline(
+        # Process markdown (clean + add image descriptions) - now returns tuple
+        cleaned_markdown, markdown_stats = self.markdown_processor.pipeline(
             raw_markdown_path=raw_markdown_path,
             image_metadata=image_metadata,
             save_cleaned=False
@@ -96,13 +103,14 @@ class PDFProcessor:
         markdown_path = output_dir / MARKDOWN_SUBDIR / f"{doc_id}.md"
         markdown_path.write_text(cleaned_markdown, encoding='utf-8')
         
-        # Create result object
+        # Create result object with combined stats
+        combined_stats = {**self.stats, **markdown_stats}
         result_obj = ProcessingResult(
             document_id=doc_id,
             total_pages=len(document.pages),
             markdown_path=markdown_path,
             images=images,
-            stats=self.stats.copy()
+            stats=combined_stats
         )
         
         # Save metadata
@@ -251,10 +259,16 @@ class PDFProcessor:
         return (min_w <= w <= max_w) and (min_h <= h <= max_h)
     
     def _compute_hash(self, image: Image.Image) -> str:
-        """Compute SHA256 hash of image."""
-        buffer = BytesIO()
-        image.save(buffer, format='PNG')
-        return hashlib.sha256(buffer.getvalue()).hexdigest()
+        """Compute perceptual hash (or SHA256 fallback) of image."""
+        if HAS_IMAGEHASH:
+            # Use perceptual hashing - detects similar images, faster
+            phash = imagehash.phash(image, hash_size=8)
+            return str(phash)
+        else:
+            # Fallback to SHA256 - exact match only
+            buffer = BytesIO()
+            image.save(buffer, format='PNG')
+            return hashlib.sha256(buffer.getvalue()).hexdigest()
     
     def _log_stats(self):
         """Log processing statistics."""

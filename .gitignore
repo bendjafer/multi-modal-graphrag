@@ -60,6 +60,8 @@ Thumbs.db
 *.log
 EOF
 
+# texts
+*.txt
 
 
 # git add .gitignore config.py models.py pdf_processor.py process.py requirements.txt trash/ vision_model.py
