@@ -185,14 +185,15 @@ class VisionModel:
         raise Exception("Max retries exceeded")
     
     async def _call_api(self, base64_image: str, context: str) -> str:
-        """Call OpenAI API with optimized prompt."""
+        """Call OpenAI API with 3-way classification prompt."""
         prompt = f"""Analyze this image for Knowledge Graph RAG extraction.
 
 Context: {context[:300] if context else 'None'}
 
-CRITICAL: Start with EXACTLY "0" or "1":
-- "1" = KEEP (valuable for knowledge graphs: diagrams, charts, technical schematics, data tables, flowcharts)
+CRITICAL: Start with EXACTLY "0", "1", or "2":
+- "1" = KEEP (diagrams, charts, technical schematics, flowcharts, graphs, infographics)
 - "0" = REJECT (decorative: logos, icons, stock photos, backgrounds, page separators)
+- "2" = TABLE (data tables, spreadsheets, tabular data with rows/columns)
 
 If "1", continue with:
 DESCRIPTION: [Detailed analysis - type, components, data, labels, relationships]
@@ -201,13 +202,19 @@ ENTITIES: [{{"type":"component|concept|metric|process", "name":"...", "propertie
 If "0", continue with:
 REASON: [Why rejected]
 
+If "2", continue with:
+REASON: Table detected - will be reconstructed separately.
+
 Examples:
 "1
-DESCRIPTION: System architecture diagram showing 3-tier design: frontend (React), API layer (Node.js), database (PostgreSQL). Arrows indicate data flow. Labels show REST endpoints and authentication flow.
-ENTITIES: [{{"type":"component","name":"Frontend","properties":"React framework"}},{{"type":"component","name":"API Layer","properties":"Node.js with REST"}},{{"type":"database","name":"PostgreSQL","properties":"Data storage"}}]"
+DESCRIPTION: System architecture diagram showing 3-tier design: frontend (React), API layer (Node.js), database (PostgreSQL). Arrows indicate data flow.
+ENTITIES: [{{"type":"component","name":"Frontend","properties":"React framework"}},{{"type":"component","name":"API Layer","properties":"Node.js with REST"}}]"
 
 "0
 REASON: Company logo in header, purely decorative."
+
+"2
+REASON: Data table with performance metrics across multiple categories."
 
 Now analyze:"""
 
@@ -230,41 +237,31 @@ Now analyze:"""
         return response.choices[0].message.content.strip()
     
     def _parse_response(self, text: str) -> Dict:
-        """Parse AI response into structured data."""
+        """Parse AI response into structured data (handles 0/1/2 decisions)."""
         if not text:
-            return {
-                "keep": False, 
-                "reason": "Empty response", 
-                "description": None, 
-                "entities": None
-            }
+            return {"keep": False, "is_table": False, "reason": "Empty response",
+                    "description": None, "entities": None}
         
         decision = text[0]
-        if decision not in ['0', '1']:
+        if decision not in ['0', '1', '2']:
             logger.warning(f"Invalid decision character: {decision}")
-            return {
-                "keep": False, 
-                "reason": "Invalid format", 
-                "description": None, 
-                "entities": None
-            }
+            return {"keep": False, "is_table": False, "reason": "Invalid format",
+                    "description": None, "entities": None}
         
-        keep = (decision == '1')
+        reason_match = re.search(r'REASON:\s*(.+)', text, re.IGNORECASE | re.DOTALL)
+        reason = reason_match.group(1).strip() if reason_match else text[1:].strip()
         
-        if not keep:
-            reason_match = re.search(r'REASON:\s*(.+)', text, re.IGNORECASE | re.DOTALL)
-            reason = reason_match.group(1).strip() if reason_match else text[1:].strip()
-            return {
-                "keep": False, 
-                "reason": reason, 
-                "description": None, 
-                "entities": None
-            }
+        if decision == '2':
+            return {"keep": False, "is_table": True, "reason": reason,
+                    "description": None, "entities": None}
         
+        if decision == '0':
+            return {"keep": False, "is_table": False, "reason": reason,
+                    "description": None, "entities": None}
+        
+        # decision == '1' — keep
         desc_match = re.search(
-            r'DESCRIPTION:\s*(.+?)(?=ENTITIES:|$)', 
-            text, 
-            re.IGNORECASE | re.DOTALL
+            r'DESCRIPTION:\s*(.+?)(?=ENTITIES:|$)', text, re.IGNORECASE | re.DOTALL
         )
         description = desc_match.group(1).strip() if desc_match else ""
         
@@ -276,9 +273,121 @@ Now analyze:"""
             except json.JSONDecodeError:
                 logger.warning("Failed to parse entities JSON")
         
-        return {
-            "keep": True,
-            "reason": "Valuable for knowledge graph",
-            "description": description,
-            "entities": entities
-        }
+        return {"keep": True, "is_table": False, "reason": "Valuable for knowledge graph",
+                "description": description, "entities": entities}
+    
+    async def reconstruct_table(self, pil_image: Image.Image, context: str = "") -> Dict:
+        """Send a table image to OpenAI for markdown reconstruction + GraphRAG description.
+        
+        Returns dict with 'markdown' and 'description' keys.
+        """
+        async with self.semaphore:
+            base64_image = self._encode_image_from_pil(pil_image)
+            
+            prompt = f"""Reconstruct the table in this image as a clean Markdown table, then describe it.
+
+Context: {context[:200] if context else 'None'}
+
+Rules:
+- Preserve all data values exactly as shown
+- Use proper Markdown table syntax with | and ---
+- Maintain column alignment
+- If cells are merged, repeat the value
+- If text is unclear, use [unclear] placeholder
+
+Output format (follow EXACTLY):
+TABLE:
+| Column1 | Column2 |
+| --- | --- |
+| data | data |
+
+DESCRIPTION: [1-2 sentences: what this table contains, key entities, metrics, and relationships useful for a knowledge graph]
+
+Output now:"""
+            
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": prompt},
+                            {"type": "image_url", "image_url": {
+                                "url": f"data:image/png;base64,{base64_image}",
+                                "detail": "high"
+                            }}
+                        ]
+                    }],
+                    max_tokens=2000,
+                    temperature=0.1
+                )
+                raw = response.choices[0].message.content.strip()
+                return self._parse_table_response(raw)
+            except Exception as e:
+                logger.error(f"Table reconstruction failed: {e}")
+                return {"markdown": "", "description": ""}
+    
+    async def reconstruct_table_from_html(self, html_content: str, context: str = "") -> Dict:
+        """Reconstruct a table from Docling HTML output via OpenAI (text-only, no image).
+        
+        Returns dict with 'markdown' and 'description' keys.
+        """
+        async with self.semaphore:
+            prompt = f"""Convert this HTML table into a clean Markdown table, then describe it.
+
+Context: {context[:200] if context else 'None'}
+
+HTML Table:
+{html_content[:3000]}
+
+Rules:
+- Preserve all data values exactly
+- Use proper Markdown table syntax with | and ---
+- Maintain column alignment
+- If cells are merged, repeat the value
+
+Output format (follow EXACTLY):
+TABLE:
+| Column1 | Column2 |
+| --- | --- |
+| data | data |
+
+DESCRIPTION: [1-2 sentences: what this table contains, key entities, metrics, and relationships useful for a knowledge graph]
+
+Output now:"""
+            
+            try:
+                response = await self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{
+                        "role": "user",
+                        "content": prompt
+                    }],
+                    max_tokens=2000,
+                    temperature=0.1
+                )
+                raw = response.choices[0].message.content.strip()
+                return self._parse_table_response(raw)
+            except Exception as e:
+                logger.error(f"Table reconstruction from HTML failed: {e}")
+                return {"markdown": "", "description": ""}
+    
+    def _parse_table_response(self, text: str) -> Dict:
+        """Parse table reconstruction response into markdown + description."""
+        if not text:
+            return {"markdown": "", "description": ""}
+        
+        desc_match = re.search(r'DESCRIPTION:\s*(.+)', text, re.IGNORECASE | re.DOTALL)
+        description = desc_match.group(1).strip() if desc_match else ""
+        
+        # Extract markdown table: everything between TABLE: and DESCRIPTION:
+        table_match = re.search(
+            r'TABLE:\s*\n(.*?)(?=\nDESCRIPTION:|\Z)', text, re.IGNORECASE | re.DOTALL
+        )
+        if table_match:
+            markdown = table_match.group(1).strip()
+        else:
+            # Fallback: take everything before DESCRIPTION as the table
+            markdown = text[:desc_match.start()].strip() if desc_match else text.strip()
+        
+        return {"markdown": markdown, "description": description}

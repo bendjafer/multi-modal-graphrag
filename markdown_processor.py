@@ -30,13 +30,18 @@ class MarkdownProcessor:
     HEADER_PADDING = "___HEADER_PROTECTED___"
     HEADER_PATTERN = re.compile(r'^(#{1,6})\s+(.+)$')
     
-    # Citation patterns (inline superscript numbers)
-    # Simpler pattern - we'll filter keywords manually
-    CITATION_PATTERN = re.compile(r'\s+(\d{1,3})\s+')
-    CONTEXTUAL_KEYWORDS_LIST = [
-        'article', 'section', 'page', 'figure', 'table', 'chapter',
-        'appendix', 'para', 'paragraph', 'act', 'rule', 'regulation',
-        'no.', 'number', 'vol', 'volume', 'part'
+    # Citation patterns for academic references
+    CITATION_PATTERNS = [
+        re.compile(r'^\[\d+\]|\(\d+\)'),                                           # [1] or (1)
+        re.compile(r'\b[A-Z][a-z]+ et al\., \d{4}|\(\w+, \d{4}\)'),               # Smith et al., 2021
+        re.compile(r'\bdoi:\S+|http[s]?://\S+'),                                    # DOI/URL references
+        re.compile(r'^\[\d+(,\s*\d+)*\]|\(\d+(,\s*\d+)*\)'),                      # [1,2,3] or (1,2,3)
+        re.compile(r'[A-Za-z\s]+, \d{1,4}\([\d\-]+\):\d+\-\d+'),                  # Journal Vol(Issue):Pages
+        re.compile(r'\[\d+(?:[-–]\d+)?\]'),                                        # [1-3] ranges
+        re.compile(                                                                 # Footnote bibliography entries:
+            r'^\d{1,3}\s+[A-Z][^.\n]+,[^.\n]+,.*?\d{4}\.?\s*$',                   # "18 Author, 'Title', Source, 2021."
+            re.MULTILINE
+        ),
     ]
     
     # Photo credit patterns  
@@ -252,36 +257,15 @@ class MarkdownProcessor:
         return text, images_added
     
     def _remove_inline_citations(self, text: str) -> Tuple[str, int]:
-        """Remove inline citation numbers like 'text 25 more'. Returns (text, count_removed)."""
+        """Remove academic citation patterns. Returns (text, count_removed)."""
         citations_removed = 0
-        
-        # Find all matches
-        matches = list(self.CITATION_PATTERN.finditer(text))
-        
-        # Filter out numbers preceded by contextual keywords
-        valid_citations = []
-        for match in matches:
-            # Get surrounding context
-            start_pos = max(0, match.start() - 20)
-            context_before = text[start_pos:match.start()].lower()
-            
-            # Check if any keyword appears immediately before
-            is_contextual = any(
-                keyword in context_before.split()[-2:]  # Last 2 words
-                for keyword in self.CONTEXTUAL_KEYWORDS_LIST
-            )
-            
-            if not is_contextual:
-                valid_citations.append(match)
-        
-        # Replace from end to start to preserve positions
-        result = text
-        for match in reversed(valid_citations):
-            # Replace with single space
-            result = result[:match.start()] + ' ' + result[match.end():]
-            citations_removed += 1
-        
-        return result, citations_removed
+        for pattern in self.CITATION_PATTERNS:
+            matches = list(pattern.finditer(text))
+            # Replace from end to preserve positions
+            for match in reversed(matches):
+                text = text[:match.start()] + text[match.end():]
+                citations_removed += 1
+        return text, citations_removed
     
     def _remove_photo_credits(self, text: str) -> str:
         """Remove photo credit lines like 'Jana Shnipelson - Unsplash'."""

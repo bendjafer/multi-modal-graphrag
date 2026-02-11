@@ -36,3 +36,7 @@ langdetect>=1.0.9
 
 # Caching
 diskcache>=5.6.0
+
+# Text chunking (LangChain)
+langchain-text-splitters>=0.3.0
+tiktoken>=0.8.0
