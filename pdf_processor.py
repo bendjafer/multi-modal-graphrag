@@ -12,6 +12,7 @@ from docling.datamodel.pipeline_options import (
     PdfPipelineOptions, TableStructureOptions, TableFormerMode
 )
 from docling.document_converter import DocumentConverter, PdfFormatOption
+from docling_core.types.doc.labels import DocItemLabel
 from PIL import Image
 
 from config import (
@@ -69,8 +70,12 @@ class PDFProcessor:
         result = converter.convert(pdf_path)
         document = result.document
         
-        # Export raw markdown
-        raw_markdown_content = document.export_to_markdown()
+        # Export raw markdown (excluding references)
+        markdown_labels = {
+            l for l in DocItemLabel 
+            if l != DocItemLabel.REFERENCE
+        }
+        raw_markdown_content = document.export_to_markdown(labels=markdown_labels)
         raw_markdown_path = output_dir / MARKDOWN_SUBDIR / f"{doc_id}_raw.md"
         raw_markdown_path.parent.mkdir(exist_ok=True)
         raw_markdown_path.write_text(raw_markdown_content, encoding='utf-8')
@@ -96,16 +101,26 @@ class PDFProcessor:
                 content = f"<!-- description: {table.description} -->\n\n{content}"
             table_path.write_text(content, encoding='utf-8')
         
-        # Prepare image metadata for markdown injection
-        image_metadata = [
-            {'page': img.page, 'description': img.description, 'entities': img.entities} 
-            for img in images
-        ]
+        # Save images as individual markdown files (figures)
+        for i, img in enumerate(images):
+            figure_path = images_dir / f"figure_page{img.page:03d}_{i}.md"
+            content = f"![Figure]({img.path.name})\n"
+            
+            if img.description:
+                content= f"\n**Description:** {img.description}\n"
+            
+            if img.entities:
+                content += "\n**Entities:**\n"
+                for entity in img.entities:
+                    name = entity.get('name', 'unknown')
+                    etype = entity.get('type', 'unknown')
+                    content += f"- {name} ({etype})\n"
+            
+            figure_path.write_text(content, encoding='utf-8')
         
-        # Process markdown (clean + add image descriptions)
+        # Process markdown (clean only, no metadata injection)
         cleaned_markdown, markdown_stats = self.markdown_processor.pipeline(
             raw_markdown_path=raw_markdown_path,
-            image_metadata=image_metadata,
             save_cleaned=False
         )
         
@@ -122,7 +137,7 @@ class PDFProcessor:
             markdown_content=cleaned_markdown,
             tables=all_tables,
             images=images,
-            language=markdown_stats.get('language'),
+            language="en",
         )
         self.chunker.save_chunks(chunking_result, chunks_dir)
         

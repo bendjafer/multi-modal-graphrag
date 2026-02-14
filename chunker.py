@@ -25,9 +25,7 @@ from models import (
 logger = logging.getLogger(__name__)
 
 
-# Regex to detect markdown table rows: lines starting and ending with |
-_TABLE_ROW_PATTERN = re.compile(r'^\|.*\|$')
-_TABLE_SEPARATOR_PATTERN = re.compile(r'^\|[\s\-:|]+\|$')
+
 
 
 class DocumentChunker:
@@ -55,12 +53,10 @@ class DocumentChunker:
     ]
     
     # Pattern to strip section metadata comments injected by MarkdownProcessor
+    # (Kept just in case old files are processed, but new flow won't add them)
     SECTION_META_PATTERN = re.compile(
         r'<!-- section:id=\S+ level=\d+ num=\d+ -->\n?'
     )
-    
-    # Pattern to strip document language comment
-    DOC_LANG_PATTERN = re.compile(r'<!-- document:lang=(\w+) -->\n?')
     
     def __init__(
         self,
@@ -90,10 +86,10 @@ class DocumentChunker:
     def chunk_document(
         self,
         document_id: str,   # Unique identifier for the document.
-        markdown_content: str,  # Cleaned markdown text (from MarkdownProcessor).
-        tables: Optional[List[TableAsset]] = None,  # List of extracted TableAsset objects.
-        images: Optional[List[ImageAsset]] = None,  # List of extracted ImageAsset objects.
-        language: Optional[str] = None,  # Detected language code (e.g., "en").
+        markdown_content: str,  # Cleaned markdown text.
+        tables: Optional[List[TableAsset]] = None,
+        images: Optional[List[ImageAsset]] = None,
+        language: str = "en",
     ) -> ChunkingResult:
         """Chunk a complete document into text, table, and image chunks, 
         Returns:
@@ -102,30 +98,11 @@ class DocumentChunker:
         tables = tables or []
         images = images or []
         
-        # --- Extract document language if present ---
-        if not language:
-            lang_match = self.DOC_LANG_PATTERN.search(markdown_content)
-            if lang_match:
-                language = lang_match.group(1)
-        
-        # --- Clean metadata comments before chunking ---
-        clean_text = self._strip_metadata(markdown_content)
-        
-        # --- Remove the "Extracted Figures" appendix ---
-        # This section is auto-appended by MarkdownProcessor and 
-        # duplicates image data — images are already handled as ImageChunks
-        clean_text = self._remove_extracted_figures_section(clean_text)
-        
-        # --- FIX #1: Strip inline markdown tables from text ---
-        # Tables are already captured as TableChunks; leaving them in
-        # the text creates duplicate embeddings
-        clean_text = self._strip_inline_tables(clean_text)
-        
         # --- Text chunking ---
         text_chunks = self._chunk_text(
             document_id=document_id,
-            text=clean_text,
-            language=language,
+            text=markdown_content,
+            language=language or "en",
         )
         
         # --- Table chunking ---
@@ -173,87 +150,7 @@ class DocumentChunker:
             stats=stats,
         )
     
-    def _strip_metadata(self, text: str) -> str:
-        """Remove section/document metadata comments from markdown."""
-        text = self.SECTION_META_PATTERN.sub('', text)
-        text = self.DOC_LANG_PATTERN.sub('', text)
-        return text.strip()
-    
-    def _remove_extracted_figures_section(self, text: str) -> str:
-        """Remove the auto-appended 'Extracted Figures' section.
-        
-        This section is added by MarkdownProcessor._add_image_descriptions()
-        and duplicates info that will be captured as ImageChunks.
-        """
-        # Find the separator + heading
-        marker = "\n---\n\n## Extracted Figures"
-        idx = text.find(marker)
-        if idx != -1:
-            text = text[:idx].rstrip()
-        return text
-    
-    def _strip_inline_tables(self, text: str) -> str:
-        """Remove markdown table blocks from text content.
 
-        FIX #1: Tables embedded inline in the markdown are already captured
-        independently as TableChunks via the TableAsset pipeline. Leaving
-        them in the text creates duplicate embeddings and wastes vector DB
-        storage. This method strips contiguous blocks of | ... | rows.
-
-        IMPROVEMENTS:
-        - More robust detection of table boundaries
-        - Better handling of tables immediately followed by content
-        - Only add placeholder for substantial tables (3+ rows)
-        - Cleaner whitespace handling around placeholders
-        """
-        lines = text.split('\n')
-        result = []
-        in_table = False
-        table_lines_count = 0
-
-        for i, line in enumerate(lines):
-            stripped = line.strip()
-            is_table_row = bool(
-                stripped and _TABLE_ROW_PATTERN.match(stripped)
-            )
-
-            if is_table_row and not in_table:
-                # Starting a table block
-                in_table = True
-                table_lines_count = 1
-                # Don't append — skip table rows
-            elif is_table_row and in_table:
-                # Continuing a table block — skip
-                table_lines_count += 1
-            elif not is_table_row and in_table:
-                # Table ended
-                in_table = False
-                # Only add placeholder if table had at least 3 rows (header + separator + data)
-                if table_lines_count >= 3:
-                    # Add placeholder on its own line, preserve spacing
-                    if result and result[-1].strip():  # Previous line has content
-                        result.append('')
-                    result.append('[Table omitted — see table chunks]')
-                    if stripped:  # Current line has content
-                        result.append('')
-                # Add the current non-table line
-                if stripped or not in_table:  # Keep non-empty lines or spacing after tables
-                    result.append(line)
-                table_lines_count = 0
-            else:
-                # Regular content
-                result.append(line)
-
-        # Handle table at end of text
-        if in_table and table_lines_count >= 3:
-            if result and result[-1].strip():
-                result.append('')
-            result.append('[Table omitted — see table chunks]')
-
-        # Clean up excessive blank lines around placeholders
-        cleaned = '\n'.join(result)
-        cleaned = re.sub(r'\n{3,}', '\n\n', cleaned)  # Max 2 consecutive newlines
-        return cleaned
 
 
         # ============================================================================
@@ -522,10 +419,8 @@ class DocumentChunker:
                 table.markdown_content
             )
             
-            # Build embeddable content: description + table markdown
+            # Content is just the table markdown (description is stored separately)
             content = table.markdown_content
-            if table.description:
-                content = f"{table.description}\n\n{content}"
             
             chunk = TableChunk(
                 chunk_id=f"{document_id}_table_{table.page:03d}_{idx}",

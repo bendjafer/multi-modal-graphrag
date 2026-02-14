@@ -139,3 +139,42 @@ class ChunkingResult:
             'image_chunks': [c.to_dict() for c in self.image_chunks],
             'stats': self.stats
         }
+
+
+# ─── Embedding Data Models ───────────────────────────────────────────────────
+
+
+@dataclass
+class ChunkEmbedding:
+    """Vector representation of a single chunk."""
+    chunk_id: str
+    embedding: List[float]
+    dimension: int
+    provider: str = "voyage_ai"
+    model: str = "voyage-3"
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DocumentEmbeddings:
+    """Complete set of embeddings for a document."""
+    document_id: str
+    embeddings: List[ChunkEmbedding]
+    model: str
+    provider: str
+    total_embeddings: int
+    dimension: int
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            'document_id': self.document_id,
+            'model': self.model,
+            'provider': self.provider,
+            'total_embeddings': self.total_embeddings,
+            'dimension': self.dimension,
+            'embeddings': [e.to_dict() for e in self.embeddings],
+            'metadata': self.metadata
+        }
