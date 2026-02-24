@@ -14,11 +14,11 @@ class ImageAsset:
     height: int
     description: Optional[str] = None
     entities: Optional[List[Dict[str, str]]] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
-        data = asdict(self)
-        data['path'] = str(self.path)
-        return data
+        serialized = asdict(self)
+        serialized['path'] = str(self.path)
+        return serialized
 
 
 @dataclass
@@ -28,7 +28,7 @@ class TableAsset:
     markdown_content: str
     source_type: str  # 'vision' (from image) or 'docling' (from native extraction)
     description: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -42,14 +42,14 @@ class ProcessingResult:
     images: List[ImageAsset]
     tables: List[TableAsset]
     stats: Dict[str, int]
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'document_id': self.document_id,
             'total_pages': self.total_pages,
             'markdown_path': str(self.markdown_path),
-            'images': [img.to_dict() for img in self.images],
-            'tables': [tbl.to_dict() for tbl in self.tables],
+            'images': [image_asset.to_dict() for image_asset in self.images],
+            'tables': [table_asset.to_dict() for table_asset in self.tables],
             'stats': self.stats
         }
 
@@ -62,16 +62,16 @@ class TextChunk:
     """A text chunk extracted from a document section."""
     chunk_id: str                   # "{doc_id}_text_{section_id}_{idx}"
     document_id: str
-    content: str                    # The chunk text
+    content: str
     section_path: List[str]         # Hierarchical header path: ["H1 title", "H2 title", ...]
     section_id: str                 # Slug of the deepest section header
-    section_level: int              # Deepest header level (1-6)
+    section_level: int              # Deepest header level (1–6)
     chunk_index: int                # Position within section
     char_count: int
     modality: str = "text"
     page_estimate: Optional[int] = None
     language: Optional[str] = None
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -89,14 +89,14 @@ class TableChunk:
     column_count: int
     char_count: int
     modality: str = "table"
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
 
 @dataclass
 class ImageChunk:
-    """An image represented as a chunk via its description + entities."""
+    """An image represented as a chunk via its AI-generated description + entities."""
     chunk_id: str                   # "{doc_id}_img_{page}_{idx}"
     document_id: str
     content: str                    # AI-generated description
@@ -107,7 +107,7 @@ class ImageChunk:
     height: int
     char_count: int
     modality: str = "image"
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -120,16 +120,16 @@ class ChunkingResult:
     table_chunks: List[TableChunk] = field(default_factory=list)
     image_chunks: List[ImageChunk] = field(default_factory=list)
     stats: Dict[str, int] = field(default_factory=dict)
-    
+
     @property
-    def all_chunks(self) -> List[Any]:
+    def all_chunks(self) -> List:
         """Return all chunks in a flat list, ordered: text → table → image."""
         return self.text_chunks + self.table_chunks + self.image_chunks
-    
+
     @property
     def total_chunks(self) -> int:
         return len(self.text_chunks) + len(self.table_chunks) + len(self.image_chunks)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'document_id': self.document_id,
@@ -152,7 +152,7 @@ class ChunkEmbedding:
     dimension: int
     provider: str = "voyage_ai"
     model: str = "voyage-3"
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
 
@@ -167,7 +167,7 @@ class DocumentEmbeddings:
     total_embeddings: int
     dimension: int
     metadata: Dict[str, Any] = field(default_factory=dict)
-    
+
     def to_dict(self) -> Dict[str, Any]:
         return {
             'document_id': self.document_id,

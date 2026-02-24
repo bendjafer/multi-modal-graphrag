@@ -1,5 +1,5 @@
 """Generate embeddings for all chunks.
-Processes all chunks files in results directory.
+
 Usage:
     python embed_chunks.py [chunks_json_path]
 
@@ -15,11 +15,11 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from config import VOYAGE_API_KEY, VOYAGE_MODEL, BASE_OUTPUT_DIR
+from config import VOYAGE_API_KEY, VOYAGE_MODEL, BASE_OUTPUT_DIR, VOYAGE_BATCH_SIZE
 
 
 def validate_api_key(api_key: Optional[str]) -> voyageai.Client:
-    """Validate API key and return client."""
+    """Validate API key and return an initialized Voyage client."""
     if not api_key:
         print("Error: VOYAGE_API_KEY not found in .env file")
         print("Get your key at: https://www.voyageai.com/")
@@ -33,35 +33,35 @@ def validate_api_key(api_key: Optional[str]) -> voyageai.Client:
 
 
 def load_chunks(chunks_path: Path) -> tuple:
-    """Load and validate chunks from JSON file."""
+    """Load and validate chunks from a JSON file. Returns (document_id, flat_chunks)."""
     if not chunks_path.exists():
         print(f"Error: File not found: {chunks_path}")
         sys.exit(1)
 
     try:
         with open(chunks_path) as f:
-            chunks_data = json.load(f)
+            raw_chunks_json = json.load(f)
     except json.JSONDecodeError as e:
         print(f"Error: Invalid JSON file: {e}")
         sys.exit(1)
 
-    if 'document_id' not in chunks_data:
+    if 'document_id' not in raw_chunks_json:
         print("Error: Missing 'document_id' in chunks file")
         sys.exit(1)
 
-    document_id = chunks_data['document_id']
+    document_id = raw_chunks_json['document_id']
 
-    all_chunks = (
-        chunks_data.get('text_chunks', []) + 
-        chunks_data.get('table_chunks', []) + 
-        chunks_data.get('image_chunks', [])
+    flat_chunks = (
+        raw_chunks_json.get('text_chunks', []) +
+        raw_chunks_json.get('table_chunks', []) +
+        raw_chunks_json.get('image_chunks', [])
     )
 
-    if not all_chunks:
+    if not flat_chunks:
         print("Error: No chunks found in file")
         sys.exit(1)
 
-    return document_id, all_chunks
+    return document_id, flat_chunks
 
 
 def generate_embeddings_batch(
@@ -69,39 +69,39 @@ def generate_embeddings_batch(
     texts: List[str],
     chunk_ids: List[str],
     model: str,
-    batch_size: int = 128
+    batch_size: int = VOYAGE_BATCH_SIZE
 ) -> List[Dict]:
-    """Generate embeddings in batches."""
-    embeddings = []
+    """Generate embeddings in batches. Returns list of {chunk_id, embedding} dicts."""
+    all_embeddings = []
     total_batches = (len(texts) - 1) // batch_size + 1
 
-    for i in range(0, len(texts), batch_size):
-        batch_num = i // batch_size + 1
-        batch_texts = texts[i:i + batch_size]
-        batch_ids = chunk_ids[i:i + batch_size]
+    for batch_start in range(0, len(texts), batch_size):
+        batch_num = batch_start // batch_size + 1
+        text_batch = texts[batch_start:batch_start + batch_size]
+        id_batch = chunk_ids[batch_start:batch_start + batch_size]
 
         try:
-            result = client.embed(
-                batch_texts,
+            voyage_response = client.embed(
+                text_batch,
                 model=model,
                 input_type="document"
             )
 
-            batch_embeddings = result.embeddings
+            batch_embedding_vectors = voyage_response.embeddings
 
-            for chunk_id, embedding in zip(batch_ids, batch_embeddings):
-                embeddings.append({
+            for chunk_id, embedding_vector in zip(id_batch, batch_embedding_vectors):
+                all_embeddings.append({
                     'chunk_id': chunk_id,
-                    'embedding': embedding
+                    'embedding': embedding_vector
                 })
 
-            print(f"    Batch {batch_num}/{total_batches}: {len(batch_texts)} chunks")
+            print(f"    Batch {batch_num}/{total_batches}: {len(text_batch)} chunks")
 
         except Exception as e:
             print(f"    Batch {batch_num} failed: {e}")
             continue
 
-    return embeddings
+    return all_embeddings
 
 
 def save_embeddings(
@@ -110,12 +110,12 @@ def save_embeddings(
     document_id: str,
     model: str
 ) -> None:
-    """Save embeddings for GraphRAG."""
+    """Save embeddings to JSON for GraphRAG consumption."""
     if not embeddings:
         print("  No embeddings generated")
         return
 
-    output_data = {
+    embeddings_payload = {
         'document_id': document_id,
         'embedding_model': model,
         'embedding_provider': 'voyage_ai',
@@ -126,25 +126,25 @@ def save_embeddings(
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     with open(output_path, 'w') as f:
-        json.dump(output_data, f, indent=2)
+        json.dump(embeddings_payload, f, indent=2)
 
     print(f"  Saved: {output_path}")
     print(f"  Total: {len(embeddings)} embeddings")
 
 
 def process_chunks_file(chunks_path: Path, client: voyageai.Client) -> None:
-    """Process a single chunks file."""
+    """Embed all chunks from a single chunks JSON file."""
     print(f"\nProcessing: {chunks_path}")
 
-    document_id, all_chunks = load_chunks(chunks_path)
+    document_id, flat_chunks = load_chunks(chunks_path)
 
-    print(f"  Chunks: {len(all_chunks)}")
+    print(f"  Chunks: {len(flat_chunks)}")
     print(f"  Model: {VOYAGE_MODEL}")
 
-    texts = [chunk['content'] for chunk in all_chunks]
-    chunk_ids = [chunk['chunk_id'] for chunk in all_chunks]
+    texts = [chunk['content'] for chunk in flat_chunks]
+    chunk_ids = [chunk['chunk_id'] for chunk in flat_chunks]
 
-    embeddings = generate_embeddings_batch(
+    all_embeddings = generate_embeddings_batch(
         client=client,
         texts=texts,
         chunk_ids=chunk_ids,
@@ -154,7 +154,7 @@ def process_chunks_file(chunks_path: Path, client: voyageai.Client) -> None:
 
     output_path = chunks_path.parent / f"{document_id}_embeddings_voyage.json"
     save_embeddings(
-        embeddings=embeddings,
+        embeddings=all_embeddings,
         output_path=output_path,
         document_id=document_id,
         model=VOYAGE_MODEL
@@ -162,42 +162,39 @@ def process_chunks_file(chunks_path: Path, client: voyageai.Client) -> None:
 
 
 def find_all_chunks_files(base_dir: str) -> List[Path]:
-    """Find all chunks files in results directory."""
-    results_path = Path(base_dir)
-    if not results_path.exists():
+    """Find all chunks JSON files in the results directory."""
+    results_dir = Path(base_dir)
+    if not results_dir.exists():
         return []
 
-    chunks_files = list(results_path.glob("*/chunks/*_chunks.json"))
-    return sorted(chunks_files)
+    discovered_chunk_files = list(results_dir.glob("*/chunks/*_chunks.json"))
+    return sorted(discovered_chunk_files)
 
 
 def main():
     """CLI entry point."""
     client = validate_api_key(VOYAGE_API_KEY)
 
-    # Use command-line argument if provided (The argument is the path to the chunks file)
-
     if len(sys.argv) > 1:
         chunks_path = Path(sys.argv[1])
         process_chunks_file(chunks_path, client)
     else:
-        # Process all chunks files in results directory
-        chunks_files = find_all_chunks_files(BASE_OUTPUT_DIR)
+        discovered_chunk_files = find_all_chunks_files(BASE_OUTPUT_DIR)
 
-        if not chunks_files:
+        if not discovered_chunk_files:
             print(f"Error: No chunks files found in {BASE_OUTPUT_DIR}/*/chunks/")
             print("\nRun chunking first or specify path:")
             print("  python embed_chunks.py path/to/chunks.json")
             sys.exit(1)
 
-        print(f"Found {len(chunks_files)} chunks file(s)")
-        print("="*70)
+        print(f"Found {len(discovered_chunk_files)} chunks file(s)")
+        print("=" * 70)
 
-        for chunks_path in chunks_files:
+        for chunks_path in discovered_chunk_files:
             process_chunks_file(chunks_path, client)
 
-        print("\n" + "="*70)
-        print(f"Completed: {len(chunks_files)} document(s) embedded")
+        print("\n" + "=" * 70)
+        print(f"Completed: {len(discovered_chunk_files)} document(s) embedded")
 
 
 if __name__ == "__main__":

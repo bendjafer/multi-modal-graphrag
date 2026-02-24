@@ -200,7 +200,7 @@ def process(self, pdf_path: Path, context: str = "") -> ProcessingResult:
     6. Saves all assets and returns result.
     """
 
-async def _extract_and_filter_images_async(...):
+async def _extract_and_filter_images(...):
     """
     Batched, async image processing with semaphore control.
     Filters images based on size and AI classification.
